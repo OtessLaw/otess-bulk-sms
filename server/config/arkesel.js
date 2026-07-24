@@ -101,9 +101,10 @@ const sendArkeselSms = async ({ apiKey, senderId, recipients, message, scheduled
  * Fetches SMS Credit Balance from Arkesel with multi-endpoint fallbacks
  */
 const getArkeselBalance = async (apiKey) => {
-  const effectiveApiKey = apiKey || process.env.ARKESEL_API_KEY;
+  const rawKey = apiKey || process.env.ARKESEL_API_KEY || '';
+  const effectiveApiKey = String(rawKey).trim();
 
-  if (!effectiveApiKey || effectiveApiKey.trim() === '' || effectiveApiKey.includes('your_arkesel_api_key')) {
+  if (!effectiveApiKey || effectiveApiKey === '' || effectiveApiKey.includes('your_arkesel_api_key')) {
     return {
       success: true,
       simulated: true,
@@ -112,10 +113,12 @@ const getArkeselBalance = async (apiKey) => {
     };
   }
 
-  // List of known Arkesel balance endpoints (v2 and v1)
+  // Comprehensive list of known Arkesel balance endpoints & auth headers
   const endpoints = [
     { url: `${ARKESEL_BASE_URL}/clients/balance`, headers: { 'api-key': effectiveApiKey } },
-    { url: `${ARKESEL_BASE_URL}/sms/balance`, headers: { 'api-key': effectiveApiKey } },
+    { url: `${ARKESEL_BASE_URL}/clients/balance`, headers: { 'api_key': effectiveApiKey } },
+    { url: `${ARKESEL_BASE_URL}/user`, headers: { 'api-key': effectiveApiKey } },
+    { url: `https://sms.arkesel.com/api/v2/sms/balance`, headers: { 'api-key': effectiveApiKey } },
     { url: `https://sms.arkesel.com/api/v1/user?action=check-balance&api_key=${encodeURIComponent(effectiveApiKey)}`, headers: {} }
   ];
 
@@ -129,7 +132,7 @@ const getArkeselBalance = async (apiKey) => {
       });
 
       if (response.data) {
-        const bal = response.data?.data?.balance ?? response.data?.balance ?? response.data?.main_balance ?? response.data?.sms_balance;
+        const bal = response.data?.data?.balance ?? response.data?.balance ?? response.data?.main_balance ?? response.data?.sms_balance ?? response.data?.data?.sms_balance;
         if (bal !== undefined && bal !== null) {
           return {
             success: true,
@@ -149,7 +152,7 @@ const getArkeselBalance = async (apiKey) => {
   
   let errMsg = 'Failed to retrieve Arkesel SMS balance. Please verify your API Key.';
   if (lastError?.response?.status === 404 || lastError?.response?.status === 401) {
-    errMsg = 'Invalid Arkesel API Key. Please double-check your key from sms.arkesel.com, or leave it blank to use Sandbox Mode.';
+    errMsg = 'Invalid Arkesel API Key. Please double-check your key from sms.arkesel.com (API & Webhooks), or check for extra spaces.';
   } else if (lastError?.response?.data?.message) {
     errMsg = lastError.response.data.message;
   } else if (lastError?.response?.data?.error) {
