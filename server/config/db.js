@@ -7,8 +7,9 @@ const mongoose = require('mongoose');
  */
 const connectDB = async () => {
   try {
-    // Read MONGO_URI from environment variables
-    const conn = await mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/otess_sms');
+    // Read MONGODB_URI or MONGO_URI from environment variables
+    const dbUri = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/otess_sms';
+    const conn = await mongoose.connect(dbUri);
     
     console.log(`[Database] MongoDB Connected Successfully: ${conn.connection.host}`);
   } catch (error) {
