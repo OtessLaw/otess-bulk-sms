@@ -98,7 +98,7 @@ const sendArkeselSms = async ({ apiKey, senderId, recipients, message, scheduled
 };
 
 /**
- * Fetches SMS Credit Balance from Arkesel
+ * Fetches SMS Credit Balance from Arkesel with multi-endpoint fallbacks
  */
 const getArkeselBalance = async (apiKey) => {
   const effectiveApiKey = apiKey || process.env.ARKESEL_API_KEY;
@@ -112,29 +112,48 @@ const getArkeselBalance = async (apiKey) => {
     };
   }
 
-  try {
-    const response = await axios.get(`${ARKESEL_BASE_URL}/clients/balance`, {
-      headers: {
-        'api-key': effectiveApiKey
-      },
-      timeout: 10000
-    });
+  // List of known Arkesel balance endpoints (v2 and v1)
+  const endpoints = [
+    { url: `${ARKESEL_BASE_URL}/clients/balance`, headers: { 'api-key': effectiveApiKey } },
+    { url: `${ARKESEL_BASE_URL}/sms/balance`, headers: { 'api-key': effectiveApiKey } },
+    { url: `https://sms.arkesel.com/api/v1/user?action=check-balance&api_key=${encodeURIComponent(effectiveApiKey)}`, headers: {} }
+  ];
 
-    return {
-      success: true,
-      simulated: false,
-      balance: response.data?.data?.balance ?? response.data?.balance ?? 0,
-      currency: response.data?.data?.currency || 'GHS'
-    };
-  } catch (error) {
-    console.error('[Arkesel Balance Error]:', error.response?.data || error.message);
-    return {
-      success: false,
-      simulated: false,
-      balance: 0,
-      message: error.response?.data?.message || 'Failed to retrieve Arkesel SMS balance.'
-    };
+  let lastError = null;
+
+  for (const ep of endpoints) {
+    try {
+      const response = await axios.get(ep.url, {
+        headers: ep.headers,
+        timeout: 8000
+      });
+
+      if (response.data) {
+        const bal = response.data?.data?.balance ?? response.data?.balance ?? response.data?.main_balance ?? response.data?.sms_balance;
+        if (bal !== undefined && bal !== null) {
+          return {
+            success: true,
+            simulated: false,
+            balance: Number(bal),
+            currency: response.data?.data?.currency || response.data?.currency || 'GHS / SMS Credits'
+          };
+        }
+      }
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Arkesel Balance Endpoint Warning] Failed ${ep.url}:`, err.response?.data || err.message);
+    }
   }
+
+  console.error('[Arkesel Balance Error Final]:', lastError?.response?.data || lastError?.message);
+  const errMsg = lastError?.response?.data?.message || lastError?.response?.data?.error || lastError?.message || 'Failed to retrieve Arkesel SMS balance. Please verify your API Key.';
+
+  return {
+    success: false,
+    simulated: false,
+    balance: 0,
+    message: errMsg
+  };
 };
 
 module.exports = {
