@@ -146,7 +146,15 @@ const getArkeselBalance = async (apiKey) => {
   }
 
   console.error('[Arkesel Balance Error Final]:', lastError?.response?.data || lastError?.message);
-  const errMsg = lastError?.response?.data?.message || lastError?.response?.data?.error || lastError?.message || 'Failed to retrieve Arkesel SMS balance. Please verify your API Key.';
+  
+  let errMsg = 'Failed to retrieve Arkesel SMS balance. Please verify your API Key.';
+  if (lastError?.response?.status === 404 || lastError?.response?.status === 401) {
+    errMsg = 'Invalid Arkesel API Key. Please double-check your key from sms.arkesel.com, or leave it blank to use Sandbox Mode.';
+  } else if (lastError?.response?.data?.message) {
+    errMsg = lastError.response.data.message;
+  } else if (lastError?.response?.data?.error) {
+    errMsg = lastError.response.data.error;
+  }
 
   return {
     success: false,
