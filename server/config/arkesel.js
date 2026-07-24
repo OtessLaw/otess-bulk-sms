@@ -21,6 +21,31 @@ const formatPhoneNumber = (phone) => {
 };
 
 /**
+ * Formats a Date object or ISO date string into Arkesel's required format: "YYYY-MM-DD hh:mm AM/PM"
+ */
+const formatArkeselScheduledDate = (dateInput) => {
+  if (!dateInput) return null;
+  const str = String(dateInput).trim();
+  if (!str || str === 'null' || str === 'undefined' || str === 'false') return null;
+
+  const d = new Date(str);
+  if (isNaN(d.getTime())) return null;
+
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+
+  let hours = d.getHours();
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12;
+  hours = hours ? hours : 12;
+  const formattedHours = String(hours).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+
+  return `${year}-${month}-${day} ${formattedHours}:${minutes} ${ampm}`;
+};
+
+/**
  * Sends SMS via Arkesel v2 API
  * If API Key is missing or set to demo, it runs in Sandbox/Simulation mode for testing.
  */
@@ -67,17 +92,10 @@ const sendArkeselSms = async ({ apiKey, senderId, recipients, message, scheduled
       message: message
     };
 
-    // Only attach scheduled_date if a valid non-empty date string is explicitly provided
-    if (scheduledDate && String(scheduledDate).trim() !== '' && String(scheduledDate) !== 'null' && String(scheduledDate) !== 'undefined') {
-      const d = new Date(scheduledDate);
-      if (!isNaN(d.getTime())) {
-        const year = d.getFullYear();
-        const month = String(d.getMonth() + 1).padStart(2, '0');
-        const day = String(d.getDate()).padStart(2, '0');
-        const hours = String(d.getHours()).padStart(2, '0');
-        const minutes = String(d.getMinutes()).padStart(2, '0');
-        payload.scheduled_date = `${year}-${month}-${day} ${hours}:${minutes}`;
-      }
+    // Format and attach scheduled_date ONLY if explicitly provided and valid
+    const formattedScheduled = formatArkeselScheduledDate(scheduledDate);
+    if (formattedScheduled) {
+      payload.scheduled_date = formattedScheduled;
     }
 
     const response = await axios.post(`${ARKESEL_BASE_URL}/sms/send`, payload, {
