@@ -34,11 +34,12 @@ const sendArkeselSms = async ({ apiKey, senderId, recipients, message, scheduled
     throw new Error('No valid recipient phone numbers provided.');
   }
 
-  const effectiveApiKey = apiKey || process.env.ARKESEL_API_KEY;
-  const effectiveSenderId = senderId || process.env.ARKESEL_SENDER_ID || 'OTESS DATA';
+  const effectiveApiKey = String(apiKey || process.env.ARKESEL_API_KEY || '').trim();
+  const rawSenderId = senderId || process.env.ARKESEL_SENDER_ID || 'OTESS DATA';
+  const effectiveSenderId = String(rawSenderId).trim().substring(0, 11);
 
   // Sandbox / Simulation Mode if no real API key is configured
-  if (!effectiveApiKey || effectiveApiKey.trim() === '' || effectiveApiKey.includes('your_arkesel_api_key')) {
+  if (!effectiveApiKey || effectiveApiKey === '' || effectiveApiKey.includes('your_arkesel_api_key')) {
     console.log('[Arkesel Simulator] Simulated SMS Batch Dispatch:');
     console.log(`- Sender: ${effectiveSenderId}`);
     console.log(`- Recipients (${formattedRecipients.length}): ${formattedRecipients.slice(0, 5).join(', ')}...`);
@@ -66,8 +67,17 @@ const sendArkeselSms = async ({ apiKey, senderId, recipients, message, scheduled
       message: message
     };
 
-    if (scheduledDate) {
-      payload.scheduled_date = scheduledDate;
+    // Only attach scheduled_date if a valid non-empty date string is explicitly provided
+    if (scheduledDate && String(scheduledDate).trim() !== '' && String(scheduledDate) !== 'null' && String(scheduledDate) !== 'undefined') {
+      const d = new Date(scheduledDate);
+      if (!isNaN(d.getTime())) {
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        const hours = String(d.getHours()).padStart(2, '0');
+        const minutes = String(d.getMinutes()).padStart(2, '0');
+        payload.scheduled_date = `${year}-${month}-${day} ${hours}:${minutes}`;
+      }
     }
 
     const response = await axios.post(`${ARKESEL_BASE_URL}/sms/send`, payload, {
