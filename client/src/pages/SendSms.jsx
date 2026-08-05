@@ -78,7 +78,7 @@ const SendSms = () => {
           message,
           scheduledDate: scheduledDate || null
         },
-        { timeout: 120000 } // Extended 2-minute timeout for bulk SMS dispatch
+        { timeout: 0 } // Unlimited timeout for bulk SMS dispatches
       );
 
       clearInterval(interval);

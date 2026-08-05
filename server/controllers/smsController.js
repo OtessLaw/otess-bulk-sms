@@ -111,16 +111,26 @@ const sendSms = async (req, res, next) => {
     // Check if message contains dynamic variable tags
     const hasDynamicVariables = /\{\{(name|phone|email|group)\}\}/i.test(message);
 
-    if (!hasDynamicVariables) {
-      // BATCH DISPATCH: Send in chunks of 100 phone numbers per Arkesel API call
+    // Group recipients by their final rendered message text to maximize Arkesel batch efficiency
+    const messageGroups = new Map();
+    for (const recipient of recipientsList) {
+      const finalMsg = hasDynamicVariables ? replaceVariables(message, recipient) : message;
+      if (!messageGroups.has(finalMsg)) {
+        messageGroups.set(finalMsg, []);
+      }
+      messageGroups.get(finalMsg).push(recipient);
+    }
+
+    // Process each group of recipients with identical message content in 100-number chunks
+    for (const [msgText, groupRecipients] of messageGroups.entries()) {
       const CHUNK_SIZE = 100;
       const chunks = [];
-      for (let i = 0; i < recipientsList.length; i += CHUNK_SIZE) {
-        chunks.push(recipientsList.slice(i, i + CHUNK_SIZE));
+      for (let i = 0; i < groupRecipients.length; i += CHUNK_SIZE) {
+        chunks.push(groupRecipients.slice(i, i + CHUNK_SIZE));
       }
 
-      // Execute chunks in parallel batches of 5 chunks
-      const BATCH_CONCURRENCY = 5;
+      // Execute up to 10 chunks concurrently (up to 1,000 phone numbers per batch step)
+      const BATCH_CONCURRENCY = 10;
       for (let i = 0; i < chunks.length; i += BATCH_CONCURRENCY) {
         const currentBatch = chunks.slice(i, i + BATCH_CONCURRENCY);
 
@@ -132,7 +142,7 @@ const sendSms = async (req, res, next) => {
                 apiKey,
                 senderId,
                 recipients: chunkPhones,
-                message: message,
+                message: msgText,
                 scheduledDate
               });
 
@@ -146,7 +156,7 @@ const sendSms = async (req, res, next) => {
                 logsToInsert.push({
                   recipientName: recipient.name,
                   recipientPhone: recipient.phone,
-                  message: message,
+                  message: msgText,
                   status: isSuccess ? 'Success' : 'Failed',
                   senderId: senderId,
                   cost: isSuccess ? 1 : 0,
@@ -160,7 +170,7 @@ const sendSms = async (req, res, next) => {
                 logsToInsert.push({
                   recipientName: recipient.name,
                   recipientPhone: recipient.phone,
-                  message: message,
+                  message: msgText,
                   status: 'Failed',
                   senderId: senderId,
                   cost: 0,
@@ -168,57 +178,6 @@ const sendSms = async (req, res, next) => {
                   responseDetails: { error: err.message }
                 });
               }
-            }
-          })
-        );
-      }
-    } else {
-      // PERSONALIZED DISPATCH: Process recipients in parallel batches of 20
-      const CONCURRENCY_LIMIT = 20;
-      for (let i = 0; i < recipientsList.length; i += CONCURRENCY_LIMIT) {
-        const batch = recipientsList.slice(i, i + CONCURRENCY_LIMIT);
-
-        await Promise.all(
-          batch.map(async (recipient) => {
-            const personalizedMessage = replaceVariables(message, recipient);
-            try {
-              const apiResult = await sendArkeselSms({
-                apiKey,
-                senderId,
-                recipients: [recipient.phone],
-                message: personalizedMessage,
-                scheduledDate
-              });
-
-              const isSuccess = apiResult.success;
-              if (isSuccess) {
-                successCount++;
-              } else {
-                failureCount++;
-              }
-
-              logsToInsert.push({
-                recipientName: recipient.name,
-                recipientPhone: recipient.phone,
-                message: personalizedMessage,
-                status: isSuccess ? 'Success' : 'Failed',
-                senderId: senderId,
-                cost: isSuccess ? 1 : 0,
-                campaignId: campaign._id,
-                responseDetails: apiResult
-              });
-            } catch (err) {
-              failureCount++;
-              logsToInsert.push({
-                recipientName: recipient.name,
-                recipientPhone: recipient.phone,
-                message: personalizedMessage,
-                status: 'Failed',
-                senderId: senderId,
-                cost: 0,
-                campaignId: campaign._id,
-                responseDetails: { error: err.message }
-              });
             }
           })
         );
