@@ -55,6 +55,7 @@ const SendSms = () => {
 
   const handleSend = async (e) => {
     e.preventDefault();
+    if (sending) return;
     if (!message || message.trim() === '') {
       return alert('Please enter a message.');
     }
@@ -68,13 +69,17 @@ const SendSms = () => {
         setProgress((prev) => (prev < 90 ? prev + 15 : prev));
       }, 300);
 
-      const res = await API.post('/sms/send', {
-        targetType,
-        groupName: selectedGroup,
-        individualPhone,
-        message,
-        scheduledDate: scheduledDate || null
-      });
+      const res = await API.post(
+        '/sms/send',
+        {
+          targetType,
+          groupName: selectedGroup,
+          individualPhone,
+          message,
+          scheduledDate: scheduledDate || null
+        },
+        { timeout: 120000 } // Extended 2-minute timeout for bulk SMS dispatch
+      );
 
       clearInterval(interval);
       setProgress(100);
@@ -89,7 +94,7 @@ const SendSms = () => {
     } catch (error) {
       setSending(false);
       setProgress(0);
-      alert(error.response?.data?.message || 'SMS dispatch failed.');
+      alert(error.response?.data?.message || error.message || 'SMS dispatch failed.');
     }
   };
 

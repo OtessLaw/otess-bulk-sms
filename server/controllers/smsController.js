@@ -1,5 +1,5 @@
 const ExcelJS = require('exceljs');
-const { sendArkeselSms } = require('../config/arkesel');
+const { sendArkeselSms, formatPhoneNumber } = require('../config/arkesel');
 const Contact = require('../models/Contact');
 const SmsLog = require('../models/SmsLog');
 const Campaign = require('../models/Campaign');
@@ -43,31 +43,54 @@ const sendSms = async (req, res, next) => {
     const apiKey = settings.arkeselApiKey || process.env.ARKESEL_API_KEY;
     const senderId = settings.arkeselSenderId || process.env.ARKESEL_SENDER_ID || 'OTESS DATA';
 
-    let recipientsList = [];
+    let rawRecipients = [];
 
     if (targetType === 'Group') {
       const query = groupName && groupName !== 'All' ? { groupName, status: 'Active' } : { status: 'Active' };
-      recipientsList = await Contact.find(query);
+      rawRecipients = await Contact.find(query).lean();
     } else if (targetType === 'Individual') {
       if (!individualPhone) {
         return res.status(400).json({ success: false, message: 'Individual phone number is required.' });
       }
       const rawNumbers = String(individualPhone).split(',').map(n => n.trim()).filter(Boolean);
-      recipientsList = rawNumbers.map(p => ({
+      rawRecipients = rawNumbers.map(p => ({
         name: 'Recipient',
         phone: p,
         email: '',
         groupName: 'Individual'
       }));
     } else if (targetType === 'UploadedList' && Array.isArray(customRecipients)) {
-      recipientsList = customRecipients;
+      rawRecipients = customRecipients;
     } else {
       // Default fallback: send to all active contacts
-      recipientsList = await Contact.find({ status: 'Active' });
+      rawRecipients = await Contact.find({ status: 'Active' }).lean();
+    }
+
+    if (rawRecipients.length === 0) {
+      return res.status(400).json({ success: false, message: 'No recipients found for the selected target.' });
+    }
+
+    // Deduplicate and format recipient phone numbers
+    const seenPhones = new Set();
+    const recipientsList = [];
+
+    for (const r of rawRecipients) {
+      const formatted = formatPhoneNumber(r.phone);
+      if (!formatted) continue;
+      if (!seenPhones.has(formatted)) {
+        seenPhones.add(formatted);
+        recipientsList.push({
+          name: r.name || 'Valued Client',
+          phone: formatted,
+          rawPhone: r.phone,
+          email: r.email || '',
+          groupName: r.groupName || groupName || 'General'
+        });
+      }
     }
 
     if (recipientsList.length === 0) {
-      return res.status(400).json({ success: false, message: 'No recipients found for the selected target.' });
+      return res.status(400).json({ success: false, message: 'No valid phone numbers found in recipient list.' });
     }
 
     // Create Campaign Record
@@ -85,39 +108,127 @@ const sendSms = async (req, res, next) => {
     let failureCount = 0;
     const logsToInsert = [];
 
-    // Dispatch SMS messages with individualized variable replacement
-    for (const recipient of recipientsList) {
-      const personalizedMessage = replaceVariables(message, recipient);
+    // Check if message contains dynamic variable tags
+    const hasDynamicVariables = /\{\{(name|phone|email|group)\}\}/i.test(message);
 
-      const apiResult = await sendArkeselSms({
-        apiKey,
-        senderId,
-        recipients: [recipient.phone],
-        message: personalizedMessage,
-        scheduledDate
-      });
-
-      const isSuccess = apiResult.success;
-      if (isSuccess) {
-        successCount++;
-      } else {
-        failureCount++;
+    if (!hasDynamicVariables) {
+      // BATCH DISPATCH: Send in chunks of 100 phone numbers per Arkesel API call
+      const CHUNK_SIZE = 100;
+      const chunks = [];
+      for (let i = 0; i < recipientsList.length; i += CHUNK_SIZE) {
+        chunks.push(recipientsList.slice(i, i + CHUNK_SIZE));
       }
 
-      logsToInsert.push({
-        recipientName: recipient.name || 'Unknown',
-        recipientPhone: recipient.phone,
-        message: personalizedMessage,
-        status: isSuccess ? 'Success' : 'Failed',
-        senderId: senderId,
-        cost: 1,
-        campaignId: campaign._id,
-        responseDetails: apiResult
-      });
+      // Execute chunks in parallel batches of 5 chunks
+      const BATCH_CONCURRENCY = 5;
+      for (let i = 0; i < chunks.length; i += BATCH_CONCURRENCY) {
+        const currentBatch = chunks.slice(i, i + BATCH_CONCURRENCY);
+
+        await Promise.all(
+          currentBatch.map(async (chunk) => {
+            const chunkPhones = chunk.map(c => c.phone);
+            try {
+              const apiResult = await sendArkeselSms({
+                apiKey,
+                senderId,
+                recipients: chunkPhones,
+                message: message,
+                scheduledDate
+              });
+
+              const isSuccess = apiResult.success;
+              for (const recipient of chunk) {
+                if (isSuccess) {
+                  successCount++;
+                } else {
+                  failureCount++;
+                }
+                logsToInsert.push({
+                  recipientName: recipient.name,
+                  recipientPhone: recipient.phone,
+                  message: message,
+                  status: isSuccess ? 'Success' : 'Failed',
+                  senderId: senderId,
+                  cost: isSuccess ? 1 : 0,
+                  campaignId: campaign._id,
+                  responseDetails: apiResult
+                });
+              }
+            } catch (err) {
+              for (const recipient of chunk) {
+                failureCount++;
+                logsToInsert.push({
+                  recipientName: recipient.name,
+                  recipientPhone: recipient.phone,
+                  message: message,
+                  status: 'Failed',
+                  senderId: senderId,
+                  cost: 0,
+                  campaignId: campaign._id,
+                  responseDetails: { error: err.message }
+                });
+              }
+            }
+          })
+        );
+      }
+    } else {
+      // PERSONALIZED DISPATCH: Process recipients in parallel batches of 20
+      const CONCURRENCY_LIMIT = 20;
+      for (let i = 0; i < recipientsList.length; i += CONCURRENCY_LIMIT) {
+        const batch = recipientsList.slice(i, i + CONCURRENCY_LIMIT);
+
+        await Promise.all(
+          batch.map(async (recipient) => {
+            const personalizedMessage = replaceVariables(message, recipient);
+            try {
+              const apiResult = await sendArkeselSms({
+                apiKey,
+                senderId,
+                recipients: [recipient.phone],
+                message: personalizedMessage,
+                scheduledDate
+              });
+
+              const isSuccess = apiResult.success;
+              if (isSuccess) {
+                successCount++;
+              } else {
+                failureCount++;
+              }
+
+              logsToInsert.push({
+                recipientName: recipient.name,
+                recipientPhone: recipient.phone,
+                message: personalizedMessage,
+                status: isSuccess ? 'Success' : 'Failed',
+                senderId: senderId,
+                cost: isSuccess ? 1 : 0,
+                campaignId: campaign._id,
+                responseDetails: apiResult
+              });
+            } catch (err) {
+              failureCount++;
+              logsToInsert.push({
+                recipientName: recipient.name,
+                recipientPhone: recipient.phone,
+                message: personalizedMessage,
+                status: 'Failed',
+                senderId: senderId,
+                cost: 0,
+                campaignId: campaign._id,
+                responseDetails: { error: err.message }
+              });
+            }
+          })
+        );
+      }
     }
 
     // Bulk Save Logs to MongoDB
-    await SmsLog.insertMany(logsToInsert);
+    if (logsToInsert.length > 0) {
+      await SmsLog.insertMany(logsToInsert);
+    }
 
     // Update Campaign Stats
     campaign.status = failureCount === recipientsList.length ? 'Failed' : 'Completed';
