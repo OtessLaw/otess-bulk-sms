@@ -61,14 +61,9 @@ const SendSms = () => {
     }
 
     setSending(true);
-    setProgress(20);
+    setProgress(5);
 
     try {
-      // Simulate incremental progress bar animation
-      const interval = setInterval(() => {
-        setProgress((prev) => (prev < 90 ? prev + 15 : prev));
-      }, 300);
-
       const res = await API.post(
         '/sms/send',
         {
@@ -78,18 +73,48 @@ const SendSms = () => {
           message,
           scheduledDate: scheduledDate || null
         },
-        { timeout: 0 } // Unlimited timeout for bulk SMS dispatches
+        { timeout: 0 }
       );
 
-      clearInterval(interval);
-      setProgress(100);
-
       if (res.data.success) {
-        setSummary(res.data.summary);
-        setTimeout(() => {
+        const campaignId = res.data.campaignId || res.data.campaign?._id;
+        const total = res.data.summary?.total || 1;
+
+        if (!campaignId || scheduledDate) {
           setSending(false);
+          setSummary(res.data.summary || { total, success: total, failed: 0 });
           setResultModalOpen(true);
-        }, 500);
+          return;
+        }
+
+        // Poll campaign stats every 1 second until complete
+        const pollInterval = setInterval(async () => {
+          try {
+            const statsRes = await API.get(`/campaigns/${campaignId}/stats`);
+            if (statsRes.data.success) {
+              const { stats } = statsRes.data;
+              const processed = (stats.success || 0) + (stats.failed || 0);
+              const currentPercent = Math.min(99, Math.max(10, Math.round((processed / (stats.total || 1)) * 100)));
+              setProgress(currentPercent);
+
+              if (stats.isFinished) {
+                clearInterval(pollInterval);
+                setProgress(100);
+                setSummary({
+                  total: stats.total,
+                  success: stats.success,
+                  failed: stats.failed
+                });
+                setTimeout(() => {
+                  setSending(false);
+                  setResultModalOpen(true);
+                }, 500);
+              }
+            }
+          } catch (err) {
+            console.error('Polling error:', err);
+          }
+        }, 1000);
       }
     } catch (error) {
       setSending(false);

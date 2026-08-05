@@ -18,6 +18,122 @@ const replaceVariables = (templateText, contact) => {
 };
 
 /**
+ * Helper function that dispatches SMS batch asynchronously in background
+ */
+const processSmsDispatchInBackground = async ({
+  campaign,
+  recipientsList,
+  message,
+  scheduledDate,
+  apiKey,
+  senderId,
+  hasDynamicVariables
+}) => {
+  let successCount = 0;
+  let failureCount = 0;
+
+  try {
+    // Group recipients by final rendered message text to maximize Arkesel batch efficiency
+    const messageGroups = new Map();
+    for (const recipient of recipientsList) {
+      const finalMsg = hasDynamicVariables ? replaceVariables(message, recipient) : message;
+      if (!messageGroups.has(finalMsg)) {
+        messageGroups.set(finalMsg, []);
+      }
+      messageGroups.get(finalMsg).push(recipient);
+    }
+
+    // Process each group of recipients in 100-number chunks
+    for (const [msgText, groupRecipients] of messageGroups.entries()) {
+      const CHUNK_SIZE = 100;
+      const chunks = [];
+      for (let i = 0; i < groupRecipients.length; i += CHUNK_SIZE) {
+        chunks.push(groupRecipients.slice(i, i + CHUNK_SIZE));
+      }
+
+      // Execute up to 10 chunks concurrently
+      const BATCH_CONCURRENCY = 10;
+      for (let i = 0; i < chunks.length; i += BATCH_CONCURRENCY) {
+        const currentBatch = chunks.slice(i, i + BATCH_CONCURRENCY);
+        const logsToInsert = [];
+
+        await Promise.all(
+          currentBatch.map(async (chunk) => {
+            const chunkPhones = chunk.map(c => c.phone);
+            try {
+              const apiResult = await sendArkeselSms({
+                apiKey,
+                senderId,
+                recipients: chunkPhones,
+                message: msgText,
+                scheduledDate
+              });
+
+              const isSuccess = apiResult.success;
+              for (const recipient of chunk) {
+                if (isSuccess) {
+                  successCount++;
+                } else {
+                  failureCount++;
+                }
+                logsToInsert.push({
+                  recipientName: recipient.name,
+                  recipientPhone: recipient.phone,
+                  message: msgText,
+                  status: isSuccess ? 'Success' : 'Failed',
+                  senderId: senderId,
+                  cost: isSuccess ? 1 : 0,
+                  campaignId: campaign._id,
+                  responseDetails: apiResult
+                });
+              }
+            } catch (err) {
+              for (const recipient of chunk) {
+                failureCount++;
+                logsToInsert.push({
+                  recipientName: recipient.name,
+                  recipientPhone: recipient.phone,
+                  message: msgText,
+                  status: 'Failed',
+                  senderId: senderId,
+                  cost: 0,
+                  campaignId: campaign._id,
+                  responseDetails: { error: err.message }
+                });
+              }
+            }
+          })
+        );
+
+        if (logsToInsert.length > 0) {
+          await SmsLog.insertMany(logsToInsert);
+        }
+
+        // Live update campaign stats in MongoDB for frontend live progress tracking
+        await Campaign.findByIdAndUpdate(campaign._id, {
+          successCount,
+          failureCount
+        });
+      }
+    }
+
+    const finalStatus = failureCount === recipientsList.length ? 'Failed' : 'Completed';
+    await Campaign.findByIdAndUpdate(campaign._id, {
+      status: finalStatus,
+      successCount,
+      failureCount
+    });
+  } catch (err) {
+    console.error('[Background Dispatch Error]:', err);
+    await Campaign.findByIdAndUpdate(campaign._id, {
+      status: 'Failed',
+      successCount,
+      failureCount
+    });
+  }
+};
+
+/**
  * @desc    Send Bulk SMS (Group, Individual, or Direct List)
  * @route   POST /api/sms/send
  * @access  Private
@@ -100,109 +216,47 @@ const sendSms = async (req, res, next) => {
       targetType: targetType || 'Group',
       groupName: groupName || 'General',
       totalRecipients: recipientsList.length,
+      successCount: 0,
+      failureCount: 0,
       status: scheduledDate ? 'Scheduled' : 'Sending',
       scheduledDate: scheduledDate ? new Date(scheduledDate) : null
     });
 
-    let successCount = 0;
-    let failureCount = 0;
-    const logsToInsert = [];
-
-    // Check if message contains dynamic variable tags
     const hasDynamicVariables = /\{\{(name|phone|email|group)\}\}/i.test(message);
 
-    // Group recipients by their final rendered message text to maximize Arkesel batch efficiency
-    const messageGroups = new Map();
-    for (const recipient of recipientsList) {
-      const finalMsg = hasDynamicVariables ? replaceVariables(message, recipient) : message;
-      if (!messageGroups.has(finalMsg)) {
-        messageGroups.set(finalMsg, []);
-      }
-      messageGroups.get(finalMsg).push(recipient);
+    if (scheduledDate) {
+      return res.status(200).json({
+        success: true,
+        message: 'SMS campaign scheduled successfully.',
+        campaignId: campaign._id,
+        campaign,
+        summary: { total: recipientsList.length, success: 0, failed: 0 }
+      });
     }
 
-    // Process each group of recipients with identical message content in 100-number chunks
-    for (const [msgText, groupRecipients] of messageGroups.entries()) {
-      const CHUNK_SIZE = 100;
-      const chunks = [];
-      for (let i = 0; i < groupRecipients.length; i += CHUNK_SIZE) {
-        chunks.push(groupRecipients.slice(i, i + CHUNK_SIZE));
-      }
+    // Dispatch SMS batch asynchronously in background without blocking HTTP response
+    setImmediate(() => {
+      processSmsDispatchInBackground({
+        campaign,
+        recipientsList,
+        message,
+        scheduledDate: null,
+        apiKey,
+        senderId,
+        hasDynamicVariables
+      });
+    });
 
-      // Execute up to 10 chunks concurrently (up to 1,000 phone numbers per batch step)
-      const BATCH_CONCURRENCY = 10;
-      for (let i = 0; i < chunks.length; i += BATCH_CONCURRENCY) {
-        const currentBatch = chunks.slice(i, i + BATCH_CONCURRENCY);
-
-        await Promise.all(
-          currentBatch.map(async (chunk) => {
-            const chunkPhones = chunk.map(c => c.phone);
-            try {
-              const apiResult = await sendArkeselSms({
-                apiKey,
-                senderId,
-                recipients: chunkPhones,
-                message: msgText,
-                scheduledDate
-              });
-
-              const isSuccess = apiResult.success;
-              for (const recipient of chunk) {
-                if (isSuccess) {
-                  successCount++;
-                } else {
-                  failureCount++;
-                }
-                logsToInsert.push({
-                  recipientName: recipient.name,
-                  recipientPhone: recipient.phone,
-                  message: msgText,
-                  status: isSuccess ? 'Success' : 'Failed',
-                  senderId: senderId,
-                  cost: isSuccess ? 1 : 0,
-                  campaignId: campaign._id,
-                  responseDetails: apiResult
-                });
-              }
-            } catch (err) {
-              for (const recipient of chunk) {
-                failureCount++;
-                logsToInsert.push({
-                  recipientName: recipient.name,
-                  recipientPhone: recipient.phone,
-                  message: msgText,
-                  status: 'Failed',
-                  senderId: senderId,
-                  cost: 0,
-                  campaignId: campaign._id,
-                  responseDetails: { error: err.message }
-                });
-              }
-            }
-          })
-        );
-      }
-    }
-
-    // Bulk Save Logs to MongoDB
-    if (logsToInsert.length > 0) {
-      await SmsLog.insertMany(logsToInsert);
-    }
-
-    // Update Campaign Stats
-    campaign.status = failureCount === recipientsList.length ? 'Failed' : 'Completed';
-    campaign.successCount = successCount;
-    campaign.failureCount = failureCount;
-    await campaign.save();
-
+    // Immediate response to Vercel/Client in < 100ms
     res.status(200).json({
       success: true,
-      message: `SMS batch execution finished: ${successCount} Sent, ${failureCount} Failed.`,
+      message: `SMS dispatch started for ${recipientsList.length} recipients.`,
+      campaignId: campaign._id,
       campaign,
       summary: {
         total: recipientsList.length,
-        success: successCount,
-        failed: failureCount
+        success: 0,
+        failed: 0
       }
     });
   } catch (error) {

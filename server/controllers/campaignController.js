@@ -121,10 +121,10 @@ const getCampaignStats = async (req, res, next) => {
 
     const logs = await SmsLog.find({ campaignId: campaign._id });
 
-    const total = logs.length;
-    const success = logs.filter(l => l.status === 'Success').length;
-    const failed = logs.filter(l => l.status === 'Failed').length;
-    const pending = logs.filter(l => l.status === 'Pending').length;
+    const total = campaign.totalRecipients || logs.length;
+    const success = campaign.successCount ?? logs.filter(l => l.status === 'Success').length;
+    const failed = campaign.failureCount ?? logs.filter(l => l.status === 'Failed').length;
+    const isFinished = campaign.status === 'Completed' || campaign.status === 'Failed' || campaign.status === 'Scheduled';
 
     res.status(200).json({
       success: true,
@@ -133,7 +133,8 @@ const getCampaignStats = async (req, res, next) => {
         total,
         success,
         failed,
-        pending,
+        status: campaign.status,
+        isFinished,
         successRate: total > 0 ? ((success / total) * 100).toFixed(1) : 0
       }
     });
